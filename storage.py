@@ -1,25 +1,35 @@
 # storage.py
 
-import json
-import os
 import hashlib
 from datetime import datetime
-from security import sanitize_logs
+
+import streamlit as st
 
 
-HISTORY_FILE = "incident_history.json"
+# ============================================================
+# SESSION-BASED STORAGE
+# ============================================================
+
+def _get_history():
+    """
+    Return investigation history for the current
+    Streamlit browser session only.
+    """
+
+    if "investigation_history" not in st.session_state:
+        st.session_state.investigation_history = []
+
+    return st.session_state.investigation_history
 
 
-# =========================================================
+# ============================================================
 # LOG HASH
-# =========================================================
+# ============================================================
 
 def generate_log_hash(logs):
     """
-    Generate a stable SHA-256 fingerprint from the original logs.
-
-    The original logs are used only to generate the fingerprint.
-    They are NOT stored by this function.
+    Generate a normalized SHA-256 fingerprint
+    for duplicate detection.
     """
 
     normalized_logs = "\n".join(
@@ -33,113 +43,53 @@ def generate_log_hash(logs):
     ).hexdigest()
 
 
+# ============================================================
+# LOAD HISTORY
+# ============================================================
+
 def load_history():
-    if not os.path.exists(HISTORY_FILE):
-        return []
+    """
+    Return only the current user's session history.
 
-    try:
-        with open(HISTORY_FILE, "r", encoding="utf-8") as file:
-            data = json.load(file)
+    Nothing is loaded from disk or shared between users.
+    """
 
-        if not isinstance(data, list):
-            return []
-
-        changed = False
-
-        # ------------------------------------
-        # SECURITY MIGRATION
-        # ------------------------------------
-        # Sanitize older history records that
-        # may have been stored before security
-        # sanitization was implemented.
-        for item in data:
-            old_logs = item.get("logs", "")
-
-            if old_logs:
-                sanitized = sanitize_logs(old_logs)
-
-                if sanitized.logs != old_logs:
-                    item["logs"] = sanitized.logs
-                    changed = True
-
-                    report = item.get("report")
-
-                    if isinstance(report, dict):
-                        report["_security"] = {
-                            "redaction_count": sanitized.redaction_count,
-                            "categories": sanitized.categories,
-                        }
-
-        # Save cleaned history immediately
-        if changed:
-            with open(
-                HISTORY_FILE,
-                "w",
-                encoding="utf-8",
-            ) as file:
-                json.dump(
-                    data,
-                    file,
-                    indent=2,
-                    ensure_ascii=False,
-                )
-
-        return data
-
-    except (json.JSONDecodeError, OSError):
-        return []
+    return _get_history()
 
 
-# =========================================================
+# ============================================================
 # SAVE HISTORY
-# =========================================================
+# ============================================================
 
 def save_history(history):
+    """
+    Store history only in the current Streamlit session.
+    """
 
-    try:
-
-        with open(
-            HISTORY_FILE,
-            "w",
-            encoding="utf-8",
-        ) as file:
-
-            json.dump(
-                history,
-                file,
-                indent=2,
-                ensure_ascii=False,
-            )
-
-    except OSError as exc:
-
-        raise RuntimeError(
-            f"Unable to save investigation history: {exc}"
-        )
+    st.session_state.investigation_history = history
 
 
-# =========================================================
-# FIND BY HASH
-# =========================================================
+# ============================================================
+# FIND BY LOG HASH
+# ============================================================
 
 def find_by_log_hash(log_hash):
+    """
+    Find an existing investigation belonging to
+    the current session.
+    """
 
     history = load_history()
 
     for item in history:
 
-        # New secure records
         if item.get("log_hash") == log_hash:
             return item
 
-        # Backward compatibility for old records
         old_logs = item.get("logs", "")
 
         if old_logs:
-
-            old_hash = generate_log_hash(
-                old_logs
-            )
+            old_hash = generate_log_hash(old_logs)
 
             if old_hash == log_hash:
                 return item
@@ -147,9 +97,9 @@ def find_by_log_hash(log_hash):
     return None
 
 
-# =========================================================
+# ============================================================
 # ADD INVESTIGATION
-# =========================================================
+# ============================================================
 
 def add_investigation(
     logs,
@@ -157,23 +107,13 @@ def add_investigation(
     log_hash=None,
 ):
     """
-    Save an investigation.
-
-    IMPORTANT:
-    `logs` should contain the SANITIZED / REDACTED logs.
-
-    `log_hash` can be generated from the original logs so
-    duplicate detection remains accurate.
-
-    Raw logs are never intentionally persisted here.
+    Add investigation to the current user's session.
     """
 
     if log_hash is None:
         log_hash = generate_log_hash(logs)
 
-    existing = find_by_log_hash(
-        log_hash
-    )
+    existing = find_by_log_hash(log_hash)
 
     if existing:
         return existing
@@ -208,8 +148,7 @@ def add_investigation(
 
         "log_hash": log_hash,
 
-        # IMPORTANT:
-        # This must be the sanitized version.
+        # logs passed here are already sanitized
         "logs": logs,
 
         "report": report,
@@ -222,21 +161,23 @@ def add_investigation(
         investigation,
     )
 
-    save_history(
-        history
-    )
+    save_history(history)
 
     return investigation
 
 
-# =========================================================
+# ============================================================
 # UPDATE INVESTIGATION
-# =========================================================
+# ============================================================
 
 def update_investigation(
     investigation_id,
     updates,
 ):
+    """
+    Update an investigation belonging to
+    the current session.
+    """
 
     history = load_history()
 
@@ -244,24 +185,22 @@ def update_investigation(
 
         if item.get("id") == investigation_id:
 
-            item.update(
-                updates
-            )
+            item.update(updates)
 
             break
 
-    save_history(
-        history
-    )
+    save_history(history)
 
 
-# =========================================================
+# ============================================================
 # TOGGLE SAVED
-# =========================================================
+# ============================================================
 
-def toggle_saved(
-    investigation_id,
-):
+def toggle_saved(investigation_id):
+    """
+    Save / unsave an investigation for the
+    current session.
+    """
 
     history = load_history()
 
@@ -280,20 +219,22 @@ def toggle_saved(
 
             break
 
-    save_history(
-        history
-    )
+    save_history(history)
 
     return updated_item
 
 
-# =========================================================
+# ============================================================
 # DELETE INVESTIGATION
-# =========================================================
+# ============================================================
 
 def delete_investigation(
     investigation_id,
 ):
+    """
+    Delete an investigation from the
+    current user's session.
+    """
 
     history = load_history()
 
@@ -303,33 +244,39 @@ def delete_investigation(
         if item.get("id") != investigation_id
     ]
 
-    save_history(
-        history
-    )
+    save_history(history)
 
 
-# =========================================================
+# ============================================================
 # GET INVESTIGATION
-# =========================================================
+# ============================================================
 
 def get_investigation(
     investigation_id,
 ):
+    """
+    Get an investigation from the
+    current session.
+    """
 
     history = load_history()
 
     for item in history:
 
         if item.get("id") == investigation_id:
+
             return item
 
     return None
 
 
-# =========================================================
+# ============================================================
 # CLEAR HISTORY
-# =========================================================
+# ============================================================
 
 def clear_history():
+    """
+    Clear only the current user's history.
+    """
 
-    save_history([])
+    st.session_state.investigation_history = []
